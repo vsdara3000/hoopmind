@@ -7,22 +7,18 @@ class Team(Base):
     id = Column(Integer, primary_key=True)
     full_name = Column(String)
     abbreviation = Column(String)
+    nickname = Column(String, nullable=True)
     city = Column(String)
-    conference = Column(String)
-    division = Column(String)
+    state = Column(String, nullable=True)
+    year_founded = Column(Integer, nullable=True)
 
 class Player(Base):
     __tablename__ = "players"
     id = Column(Integer, primary_key=True)
     first_name = Column(String)
     last_name = Column(String)
-    position = Column(String)
-    height_feet = Column(Integer, nullable=True)
-    height_inches = Column(Integer, nullable=True)
-    weight_pounds = Column(Integer, nullable=True)
-    draft_year = Column(Integer, nullable=True)
-    draft_round = Column(Integer, nullable=True)
-    draft_number = Column(Integer, nullable=True)
+    full_name = Column(String, nullable=True)
+    is_active = Column(Boolean, nullable=True)
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
     team = relationship("Team")
 
@@ -30,10 +26,10 @@ class Game(Base):
     __tablename__ = "games"
     id = Column(Integer, primary_key=True)
     date = Column(Date)
-    home_team_id = Column(Integer, ForeignKey("teams.id"))
-    away_team_id = Column(Integer, ForeignKey("teams.id"))
-    home_team_score = Column(Integer)
-    away_team_score = Column(Integer)
+    home_team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
+    away_team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
+    home_team_score = Column(Integer, nullable=True)
+    away_team_score = Column(Integer, nullable=True)
     season = Column(Integer)
     postseason = Column(Boolean, default=False)
 
