@@ -9,6 +9,7 @@ from app.models.structured import Team, Player, Game, PlayerGameStats, SeasonAve
 def ingest_teams():
     db: Session = SessionLocal()
     nba_teams = teams.get_teams()
+    print("Ingesting teams...")
     for t in nba_teams:
         existing = db.query(Team).filter(Team.id == t["id"]).first()
         if existing:
@@ -31,10 +32,12 @@ def ingest_teams():
             db.add(team)
     db.commit()
     db.close()
+    print(f"Done — {len(nba_teams)} teams ingested")
 
 
 def ingest_players():
     db: Session = SessionLocal()
+    print("Ingesting players...")
     nba_players = players.get_players()
     for p in nba_players:
         existing = db.query(Player).filter(Player.id == p["id"]).first()
@@ -53,23 +56,26 @@ def ingest_players():
             db.add(player)
     db.commit()
     db.close()
+    print(f"Done — {len(nba_players)} players ingested")
 
 
 def ingest_games(season="2024-25"):
     db: Session = SessionLocal()
+    print(f"Ingesting games for {season}...")
     gamefinder = leaguegamefinder.LeagueGameFinder(season_nullable=season)
     games_df = gamefinder.get_data_frames()[0]
 
     game_ids_seen = set()
     for _, row in games_df.iterrows():
-        game_id = int(row["GAME_ID"])
+        game_id_str = str(row["GAME_ID"])
+        game_id = int(game_id_str)
         if game_id in game_ids_seen:
             continue
         game_ids_seen.add(game_id)
 
         existing = db.query(Game).filter(Game.id == game_id).first()
         if not existing:
-            is_postseason = str(row["SEASON_ID"]).startswith("4")
+            is_postseason = game_id_str.startswith("004")
             game = Game(
                 id=game_id,
                 date=row["GAME_DATE"],
@@ -83,10 +89,12 @@ def ingest_games(season="2024-25"):
             db.add(game)
     db.commit()
     db.close()
+    print(f"Done — {len(game_ids_seen)} games ingested")
 
 
 def ingest_player_stats(season="2024-25"):
     db: Session = SessionLocal()
+    print(f"Ingesting player stats for {season}...")
 
     gamefinder = leaguegamefinder.LeagueGameFinder(season_nullable=season)
     games_df = gamefinder.get_data_frames()[0]
@@ -171,6 +179,7 @@ def ingest_player_stats(season="2024-25"):
                 db.add(stat)
 
             db.commit()
+            print(f"[{i+1}/{len(game_ids)}] Game {game_id} done")
 
         except Exception as e:
             db.rollback()
@@ -183,6 +192,7 @@ def ingest_player_stats(season="2024-25"):
 
 def compute_season_averages():
     db: Session = SessionLocal()
+    print("Computing season averages...")
 
     for season in [2023, 2024]:
         player_ids = db.query(PlayerGameStats.player_id).join(Game, PlayerGameStats.game_id == Game.id).filter(Game.season == season).distinct().all()
@@ -191,6 +201,7 @@ def compute_season_averages():
             stats = db.query(PlayerGameStats).join(Game, PlayerGameStats.game_id == Game.id).filter(
                 PlayerGameStats.player_id == player_id,
                 Game.season == season,
+                Game.postseason == False,
                 PlayerGameStats.pts != None
             ).all()
 
@@ -224,7 +235,9 @@ def compute_season_averages():
             db.add(sa)
 
         db.commit()
+        print(f"Season {season} averages done")
     db.close()
+    print("Season averages complete")
 
 if __name__ == "__main__":
     ingest_teams()
