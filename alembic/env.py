@@ -2,12 +2,17 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 from alembic import context
+import os
+from dotenv import load_dotenv
 
 # import all models so alembic can detect them
 from app.models import structured, unstructured, conversation
 from app.database import Base
 
+load_dotenv()
+
 config = context.config
+config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
