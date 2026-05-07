@@ -3,7 +3,7 @@ from nba_api.stats.static import teams, players
 from nba_api.stats.endpoints import leaguegamefinder, boxscoretraditionalv3
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
-from app.models.structured import Team, Player, Game, PlayerGameStats
+from app.models.structured import Team, Player, Game, PlayerGameStats, SeasonAverage
 
 
 def ingest_teams():
@@ -181,6 +181,51 @@ def ingest_player_stats(season="2024-25"):
     print("Player stats ingestion complete")
 
 
+def compute_season_averages():
+    db: Session = SessionLocal()
+
+    for season in [2023, 2024]:
+        player_ids = db.query(PlayerGameStats.player_id).join(Game, PlayerGameStats.game_id == Game.id).filter(Game.season == season).distinct().all()
+
+        for (player_id,) in player_ids:
+            stats = db.query(PlayerGameStats).join(Game, PlayerGameStats.game_id == Game.id).filter(
+                PlayerGameStats.player_id == player_id,
+                Game.season == season,
+                PlayerGameStats.pts != None
+            ).all()
+
+            if not stats:
+                continue
+
+            games_played = len(stats)
+
+            def avg(attr):
+                vals = [getattr(s, attr) for s in stats if getattr(s, attr) is not None]
+                return round(sum(vals) / len(vals), 3) if vals else None
+
+            existing = db.query(SeasonAverage).filter(SeasonAverage.player_id == player_id, SeasonAverage.season == season).first()
+
+            if existing:
+                continue
+
+            sa = SeasonAverage(
+                player_id=player_id,
+                season=season,
+                games_played=games_played,
+                pts=avg("pts"),
+                reb=avg("reb"),
+                ast=avg("ast"),
+                stl=avg("stl"),
+                blk=avg("blk"),
+                fg_pct=avg("fg_pct"),
+                fg3_pct=avg("fg3_pct"),
+                ft_pct=avg("ft_pct"),
+            )
+            db.add(sa)
+
+        db.commit()
+    db.close()
+
 if __name__ == "__main__":
     ingest_teams()
     ingest_players()
@@ -188,3 +233,4 @@ if __name__ == "__main__":
     ingest_games("2024-25")
     ingest_player_stats("2023-24")
     ingest_player_stats("2024-25")
+    compute_season_averages()
