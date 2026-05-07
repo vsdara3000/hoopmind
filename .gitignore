@@ -1,6 +1,15 @@
-.venv/
 .env
+.venv/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+alembic/versions/*.pyc
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
+*.log
