@@ -30,8 +30,24 @@ class Game(Base):
     away_team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
     home_team_score = Column(Integer, nullable=True)
     away_team_score = Column(Integer, nullable=True)
+    home_team_wins = Column(Boolean, nullable=True)
     season = Column(Integer)
     postseason = Column(Boolean, default=False)
+    # new columns
+    home_team_fg_pct = Column(Float, nullable=True)
+    away_team_fg_pct = Column(Float, nullable=True)
+    home_team_fg3_pct = Column(Float, nullable=True)
+    away_team_fg3_pct = Column(Float, nullable=True)
+    home_team_reb = Column(Integer, nullable=True)
+    away_team_reb = Column(Integer, nullable=True)
+    home_team_ast = Column(Integer, nullable=True)
+    away_team_ast = Column(Integer, nullable=True)
+    home_team_tov = Column(Integer, nullable=True)
+    away_team_tov = Column(Integer, nullable=True)
+    home_team_stl = Column(Integer, nullable=True)
+    away_team_stl = Column(Integer, nullable=True)
+    home_team_blk = Column(Integer, nullable=True)
+    away_team_blk = Column(Integer, nullable=True)
 
 class PlayerGameStats(Base):
     __tablename__ = "player_game_stats"

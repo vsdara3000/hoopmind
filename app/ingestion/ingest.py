@@ -2,6 +2,7 @@ import time
 from nba_api.stats.static import teams, players
 from nba_api.stats.endpoints import leaguegamefinder, boxscoretraditionalv3
 from sqlalchemy.orm import Session
+from sympy import group
 from app.database import SessionLocal
 from app.models.structured import Team, Player, Game, PlayerGameStats, SeasonAverage
 
@@ -65,31 +66,76 @@ def ingest_games(season="2024-25"):
     gamefinder = leaguegamefinder.LeagueGameFinder(season_nullable=season)
     games_df = gamefinder.get_data_frames()[0]
 
-    game_ids_seen = set()
-    for _, row in games_df.iterrows():
-        game_id_str = str(row["GAME_ID"])
+    # group by game_id so we have both teams per game
+    grouped = games_df.groupby("GAME_ID")
+
+    for game_id_str, group in grouped:
         game_id = int(game_id_str)
-        if game_id in game_ids_seen:
-            continue
-        game_ids_seen.add(game_id)
 
         existing = db.query(Game).filter(Game.id == game_id).first()
-        if not existing:
-            is_postseason = game_id_str.startswith("004")
+
+        # identify home and away team using MATCHUP
+        # "vs." = home, "@" = away
+        home_row = group[group['MATCHUP'].str.contains('vs[.]')].iloc[0] if len(group[group['MATCHUP'].str.contains('vs[.]')]) > 0 else None
+        away_row = group[group['MATCHUP'].str.contains(' @ ')].iloc[0] if len(group[group['MATCHUP'].str.contains(' @ ')]) > 0 else None
+
+        if home_row is None or away_row is None:
+            continue
+
+        is_postseason = game_id_str.startswith("004")
+
+        if existing:
+            # update existing game with real data
+            existing.home_team_id = int(home_row['TEAM_ID'])
+            existing.away_team_id = int(away_row['TEAM_ID'])
+            existing.home_team_score = int(home_row['PTS'])
+            existing.away_team_score = int(away_row['PTS'])
+            existing.home_team_wins = home_row['WL'] == 'W'
+            existing.home_team_fg_pct = float(home_row['FG_PCT'])
+            existing.away_team_fg_pct = float(away_row['FG_PCT'])
+            existing.home_team_fg3_pct = float(home_row['FG3_PCT'])
+            existing.away_team_fg3_pct = float(away_row['FG3_PCT'])
+            existing.home_team_reb = int(home_row['REB'])
+            existing.away_team_reb = int(away_row['REB'])
+            existing.home_team_ast = int(home_row['AST'])
+            existing.away_team_ast = int(away_row['AST'])
+            existing.home_team_tov = int(home_row['TOV'])
+            existing.away_team_tov = int(away_row['TOV'])
+            existing.home_team_stl = int(home_row['STL'])
+            existing.away_team_stl = int(away_row['STL'])
+            existing.home_team_blk = int(home_row['BLK'])
+            existing.away_team_blk = int(away_row['BLK'])
+        else:
             game = Game(
                 id=game_id,
-                date=row["GAME_DATE"],
-                home_team_id=None,
-                away_team_id=None,
-                home_team_score=None,
-                away_team_score=None,
+                date=home_row['GAME_DATE'],
+                home_team_id=int(home_row['TEAM_ID']),
+                away_team_id=int(away_row['TEAM_ID']),
+                home_team_score=int(home_row['PTS']),
+                away_team_score=int(away_row['PTS']),
+                home_team_wins=home_row['WL'] == 'W',
                 season=int(season[:4]),
-                postseason=is_postseason
+                postseason=is_postseason,
+                home_team_fg_pct=float(home_row['FG_PCT']),
+                away_team_fg_pct=float(away_row['FG_PCT']),
+                home_team_fg3_pct=float(home_row['FG3_PCT']),
+                away_team_fg3_pct=float(away_row['FG3_PCT']),
+                home_team_reb=int(home_row['REB']),
+                away_team_reb=int(away_row['REB']),
+                home_team_ast=int(home_row['AST']),
+                away_team_ast=int(away_row['AST']),
+                home_team_tov=int(home_row['TOV']),
+                away_team_tov=int(away_row['TOV']),
+                home_team_stl=int(home_row['STL']),
+                away_team_stl=int(away_row['STL']),
+                home_team_blk=int(home_row['BLK']),
+                away_team_blk=int(away_row['BLK'])
             )
             db.add(game)
+
     db.commit()
     db.close()
-    print(f"Done — {len(game_ids_seen)} games ingested")
+    print(f"Done — games ingested/updated for {season}")
 
 
 def ingest_player_stats(season="2024-25"):
