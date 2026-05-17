@@ -4,16 +4,10 @@ from sentence_transformers import SentenceTransformer
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.unstructured import Document
-from app.models.structured import Player, Game, PlayerGameStats, Team
-import os
-from groq import Groq
-from dotenv import load_dotenv
-from datetime import datetime
-
-load_dotenv()
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+from app.models.structured import Player
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
+
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
     words = text.split()
@@ -122,179 +116,6 @@ def ingest_player_bios():
     print("Player bio ingestion complete")
 
 
-def ingest_game_summaries():
-    from nba_api.stats.endpoints import playbyplayv3
-    db: Session = SessionLocal()
-    print("Generating game narratives using Groq...")
-
-    games = db.query(Game).all()
-    count = 0
-    start_time = time.time()
-    print(f"Found {len(games)} games in database")
-
-    for i, game in enumerate(games, start=1):
-        # skip preseason games
-        if str(game.id).zfill(10).startswith('001'):
-            print(f"[{i}/{len(games)}] Skipping preseason game {game.id}")
-            continue
-
-        existing = db.query(Document).filter(
-            Document.source == f"game:{game.id}",
-            Document.doc_type == "narrative"
-        ).first()
-        if existing:
-            print(f"[{i}/{len(games)}] Skipping already ingested game {game.id}")
-            continue
-
-        if game.home_team_score is None or game.away_team_score is None:
-            print(f"[{i}/{len(games)}] Skipping unfinished game {game.id} ({game.date}) — missing final score")
-            continue
-
-        game_start = time.time()
-        print(f"[{i}/{len(games)}] Starting game {game.id} on {game.date} ({'playoff' if game.postseason else 'regular season'})")
-
-        try:
-            pbp = playbyplayv3.PlayByPlayV3(game_id=str(game.id).zfill(10))
-            df = pbp.get_data_frames()[0]
-            print(f"[{i}/{len(games)}] Retrieved play-by-play with {len(df)} rows")
-            time.sleep(0.6)
-
-            if df.empty:
-                print(f"[{i}/{len(games)}] No play-by-play data for game {game.id}; skipping")
-                continue
-
-            # get team names from database using game's team IDs
-            home_team = db.query(Team).filter(Team.id == game.home_team_id).first() if game.home_team_id else None
-            away_team = db.query(Team).filter(Team.id == game.away_team_id).first() if game.away_team_id else None
-
-            # fallback to play-by-play team names if not in db
-            if not home_team or not away_team:
-                team_ids = df[df['teamId'] != 0]['teamId'].unique()
-                team_names = {}
-                for tid in team_ids:
-                    team = db.query(Team).filter(Team.id == int(tid)).first()
-                    if team:
-                        team_names[int(tid)] = team.full_name
-                team_name_list = list(team_names.values())
-                matchup = f"{team_name_list[0]} vs {team_name_list[1]}" if len(team_name_list) >= 2 else "NBA game"
-                home_name = team_name_list[0] if team_name_list else "Home Team"
-                away_name = team_name_list[1] if len(team_name_list) > 1 else "Away Team"
-            else:
-                home_name = home_team.full_name
-                away_name = away_team.full_name
-                matchup = f"{away_name} @ {home_name}"
-
-            # build score line
-            if game.home_team_score and game.away_team_score:
-                if game.home_team_wins:
-                    score_line = f"Final score: {home_name} {game.home_team_score}, {away_name} {game.away_team_score}. {home_name} won."
-                else:
-                    score_line = f"Final score: {away_name} {game.away_team_score}, {home_name} {game.home_team_score}. {away_name} won."
-                score_diff = abs(game.home_team_score - game.away_team_score)
-                closeness = "close game" if score_diff <= 5 else "competitive game" if score_diff <= 10 else "blowout" if score_diff >= 20 else "moderate margin"
-            else:
-                score_line = ""
-                closeness = "unknown margin"
-
-            # build team stats context
-            team_stats = ""
-            if game.home_team_fg_pct and game.away_team_fg_pct:
-                team_stats = (
-                    f"{home_name} shot {game.home_team_fg_pct:.1%} from the field, "
-                    f"{game.home_team_fg3_pct:.1%} from three, "
-                    f"{game.home_team_reb} rebounds, {game.home_team_ast} assists, {game.home_team_tov} turnovers. "
-                    f"{away_name} shot {game.away_team_fg_pct:.1%} from the field, "
-                    f"{game.away_team_fg3_pct:.1%} from three, "
-                    f"{game.away_team_reb} rebounds, {game.away_team_ast} assists, {game.away_team_tov} turnovers."
-                )
-
-            # filter to significant plays
-            significant = df[
-                (df['actionType'].isin(['Made Shot', 'Turnover'])) |
-                (df['description'].str.contains('3PT', na=False)) |
-                (df['description'].str.contains('Dunk', na=False))
-            ].copy()
-
-            max_period = int(df['period'].max())
-            went_to_ot = max_period > 4
-
-            # build play summary capped at 80 plays
-            play_lines = []
-            for _, play in significant.iterrows():
-                if play['description'] and str(play['description']).strip():
-                    period = play['period']
-                    period_label = f"Q{period}" if period <= 4 else f"OT{period - 4 if period > 5 else ''}"
-                    team_id = int(play['teamId']) if play['teamId'] else 0
-                    team_name = home_name if team_id == game.home_team_id else away_name
-                    play_lines.append(f"{period_label} | {team_name}: {play['description']}")
-
-            plays_text = "\n".join(play_lines[:80])
-
-            season_type = "playoff" if game.postseason else "regular season"
-
-            prompt = f"""You are a sports journalist writing a game recap for an NBA {season_type} game.
-
-Game: {matchup}
-Date: {game.date}
-Season: {game.season}
-{score_line}
-Game character: {closeness}
-{"This game went to overtime." if went_to_ot else ""}
-
-Team stats:
-{team_stats}
-
-Key plays:
-{plays_text}
-
-Write a 4-5 sentence narrative recap of this game. Cover:
-- Who won and by how much
-- Who dominated and who struggled
-- Whether the game was close or a blowout and when it was decided
-- Any turning points or momentum swings
-- Standout individual performances with specific details from the plays
-
-Write like a real sports journalist. Be specific and vivid. Use player and team names.
-Write only the narrative, no headline, no preamble."""
-
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300
-            )
-            narrative = response.choices[0].message.content.strip()
-
-            doc = Document(
-                content=narrative,
-                doc_type="narrative",
-                source=f"game:{game.id}",
-                player_id=None,
-                game_id=game.id,
-                embedding=embed(narrative)
-            )
-            db.add(doc)
-
-            count += 1
-            elapsed = time.time() - game_start
-            print(f"[{i}/{len(games)}] Completed game {game.id} in {elapsed:.1f}s — {matchup} on {game.date}")
-
-            if count % 50 == 0:
-                db.commit()
-                print(f"[{count}/{len(games)}] Committed after 50 narratives")
-
-            time.sleep(0.3)
-
-        except Exception as e:
-            elapsed = time.time() - game_start
-            print(f"[{i}/{len(games)}] Failed on game {game.id} after {elapsed:.1f}s: {e}")
-            time.sleep(2)
-            continue
-
-    total_elapsed = time.time() - start_time
-    db.commit()
-    db.close()
-    print(f"Narrative generation complete — {count} games processed in {total_elapsed:.1f}s")
-
 def test_similarity_search(query: str, top_k: int = 5):
     from sqlalchemy import text
     db: Session = SessionLocal()
@@ -321,7 +142,5 @@ def test_similarity_search(query: str, top_k: int = 5):
 
 if __name__ == "__main__":
     ingest_player_bios()
-    ingest_game_summaries()
     test_similarity_search("LeBron James career achievements")
     test_similarity_search("clutch fourth quarter performance")
-    test_similarity_search("three point shooting performance")
