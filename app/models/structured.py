@@ -55,7 +55,7 @@ class PlayerGameStats(Base):
     player_id = Column(Integer, ForeignKey("players.id"))
     game_id = Column(Integer, ForeignKey("games.id"))
     team_id = Column(Integer, ForeignKey("teams.id"))
-    min = Column(String, nullable=True)
+    min = Column(Float, nullable=True)  # Changed from String to Float
     pts = Column(Integer, nullable=True)
     reb = Column(Integer, nullable=True)
     ast = Column(Integer, nullable=True)
