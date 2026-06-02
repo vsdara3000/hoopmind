@@ -15,67 +15,61 @@ SCHEMA:
 players: id, first_name, last_name, full_name, is_active, team_id
 teams: id, full_name, abbreviation, nickname, city, state, year_founded
 games: id, date, home_team_id, away_team_id, home_team_score, away_team_score,
-       home_team_wins, season, postseason,
+       home_team_wins(bool), season(int), postseason(bool),
        home_team_fg_pct, away_team_fg_pct, home_team_fg3_pct, away_team_fg3_pct,
        home_team_reb, away_team_reb, home_team_ast, away_team_ast,
        home_team_tov, away_team_tov, home_team_stl, away_team_stl,
        home_team_blk, away_team_blk
-player_game_stats: id, player_id, game_id, team_id, min (text MM:SS string), pts, reb, ast, stl, blk,
+       NOTE: games has NO ft_pct, NO fga, NO fg3a, NO ftm, NO fta columns.
+player_game_stats: id, player_id, game_id, team_id, min(TEXT MM:SS), pts, reb, ast, stl, blk,
                    fgm, fga, fg_pct, fg3m, fg3a, fg3_pct, ftm, fta, ft_pct,
                    oreb, dreb, turnover, pf
-season_averages: id, player_id, season, games_played, min, pts, reb, ast,
+season_averages: id, player_id, season(int), games_played, min, pts, reb, ast,
                  stl, blk, fg_pct, fg3_pct, ft_pct
 
-CRITICAL RULES:
-- SELECT only. No INSERT, UPDATE, DELETE, DROP.
-- Always use table aliases. Example: SELECT p.first_name, pgs.pts
-- NEVER use unaliased column names like "pts" or "min" - always use alias.pts, alias.min
-- ALWAYS use alias.column_name in SUM, AVG, COUNT functions
-- player_game_stats.min is TEXT in MM:SS format. Do NOT use pgs.min, SUM(pgs.min), AVG(pgs.min), pgs.min::float, or HAVING clauses on pgs.min unless the user explicitly asks about minutes.
-- Do NOT add a minutes-played qualifier for scoring, rebounds, assists, shooting, leaders, or average-stat questions. Use games played or attempts as qualifiers instead.
-- For regular-season questions, add g.postseason = FALSE. Only use g.postseason = TRUE when the user says playoffs or postseason.
-- For player per-game stats from player_game_stats: use decimal division, e.g. SUM(pgs.pts)::float / NULLIF(COUNT(DISTINCT pgs.game_id), 0). NEVER divide two integers directly.
-- For shooting percentages: use decimal division over makes and attempts, e.g. SUM(pgs.fgm)::float / NULLIF(SUM(pgs.fga), 0). Do NOT average per-game pct columns for season/career percentages.
-- Aggregate filters like SUM(pgs.fga) >= 300 must go in HAVING after GROUP BY, never in WHERE.
-- For scoring/rebounds/assists leaders, do not add a HAVING qualifier unless the user asks for official qualification. If qualification is needed for regular-season per-game leaders, use HAVING COUNT(DISTINCT pgs.game_id) >= 58.
-- For "best", "highest", "leader", or ranked shooting percentage queries, default to qualified leaders unless the user asks for unqualified/raw leaders. Use these exact minimums:
-  regular-season FG%: HAVING SUM(pgs.fga) >= 300
-  regular-season 3P%: HAVING SUM(pgs.fg3a) >= 200
-  regular-season FT%: HAVING SUM(pgs.fta) >= 125
-  playoff FG%: HAVING SUM(pgs.fga) >= 50
-  playoff 3P%: HAVING SUM(pgs.fg3a) >= 10
-  playoff FT%: HAVING SUM(pgs.fta) >= 50
-  Always ORDER BY the calculated percentage DESC NULLS LAST.
-- For team per-game stats, use the team totals in games via UNION ALL, then AVG the per-game team totals. Example for assists:
-  SELECT t.full_name, AVG(ts.ast)::float AS avg_assists
-  FROM (
-    SELECT g.home_team_id AS team_id, g.home_team_ast AS ast FROM games g WHERE g.season = 2024 AND g.postseason = FALSE
+RULES:
+- SELECT only. No INSERT/UPDATE/DELETE/DROP.
+- Always use table aliases (p, t, g, pgs, sa). Never use unaliased column names.
+- pgs.min is TEXT (MM:SS). Never SUM, AVG, cast, or filter on pgs.min. Exclude it unless user asks about minutes.
+- Player searches: ILIKE '%name%' on both first_name and last_name, OR match full_name.
+- Player stats: always return aggregated averages not individual rows unless asked for game log.
+- Per-game averages: SUM(pgs.pts)::float / NULLIF(COUNT(DISTINCT pgs.game_id), 0).
+- Shooting %: SUM(pgs.fgm)::float / NULLIF(SUM(pgs.fga), 0). Never AVG(pgs.fg_pct).
+- Aggregate filters go in HAVING, never WHERE.
+- Regular season: g.postseason = FALSE. Playoffs: g.postseason = TRUE.
+- season 2023 = 2023-24 season, season 2024 = 2024-25 season.
+- home_team_wins is BOOLEAN. Never compare it to an integer.
+- Real teams only: WHERE t.year_founded IS NOT NULL.
+- games table has NO ft_pct, fga, fg3a, ftm, fta columns. For team FT% use player_game_stats.
+- For team FG% use AVG(ts.fg_pct) via UNION ALL. For team FT% aggregate from pgs grouped by team/game.
+- Home vs away player splits: use CASE WHEN g.home_team_id = pgs.team_id THEN ... END. Count games with COUNT(CASE WHEN g.home_team_id = pgs.team_id THEN 1 END).
+- For team per-game stats use UNION ALL pattern only:
+  SELECT t.full_name, AVG(ts.stat) FROM (
+    SELECT g.home_team_id AS team_id, g.home_team_stat AS stat FROM games g WHERE ...
     UNION ALL
-    SELECT g.away_team_id AS team_id, g.away_team_ast AS ast FROM games g WHERE g.season = 2024 AND g.postseason = FALSE
-  ) ts
-  JOIN teams t ON ts.team_id = t.id
-  WHERE t.year_founded IS NOT NULL
-  GROUP BY t.full_name
-  ORDER BY avg_assists DESC NULLS LAST
-- NEVER join teams with "g.home_team_id = t.id OR g.away_team_id = t.id" for team per-game stats.
-- NEVER calculate a team's per-game stat as SUM(g.home_team_stat) + SUM(g.away_team_stat), AVG(g.home_team_stat + g.away_team_stat), or any combined home+away game total.
-- Do NOT compute team per-game stats as AVG(player_game_stats.stat) / COUNT(games).
-- Filter by season using the games alias, e.g. WHERE g.season = 2024 (integer)
-- Real teams only: WHERE teams.year_founded IS NOT NULL
+    SELECT g.away_team_id, g.away_team_stat FROM games g WHERE ...
+  ) ts JOIN teams t ON ts.team_id = t.id WHERE t.year_founded IS NOT NULL GROUP BY t.full_name
+- Never JOIN teams with OR condition (home_team_id = t.id OR away_team_id = t.id).
+- Never compute team stats as combined home+away totals in same row.
+- Qualified shooting % minimums (HAVING):
+  RS FG%: fga>=300 | RS 3P%: fg3a>=200 | RS FT%: fta>=125
+  PO FG%: fga>=50 | PO 3P%: fg3a>=10 | PO FT%: fta>=50
+- RS per-game leaders: HAVING COUNT(DISTINCT pgs.game_id) >= 58.
+- Always wrap OR player name conditions in parentheses: WHERE (first_name ILIKE '%x%' AND last_name ILIKE '%y%') AND other_conditions. Never use OR without parentheses when mixing with AND filters on other columns.
+- season_averages columns (pts, reb, ast, stl, blk, fg_pct, fg3_pct, ft_pct) are already per-game averages. SELECT them directly. Never divide by games_played.
+- For team stats with multiple columns, use a single query from player_game_stats grouped by team_id and game_id, then average across games. Never generate multiple UNION ALL blocks per stat column.
 - LIMIT 50 unless asked for more.
-- Return ONLY raw SQL. No markdown, backticks, explanation."""
+- Return ONLY raw SQL. No markdown, backticks, explanation. First char must be S."""
 
 
 def clean_sql(sql: str) -> str:
-    """Normalize model SQL output and remove known unsafe generated clauses."""
+    """Remove markdown fencing and invalid generated clauses."""
     sql = sql.strip()
     if sql.startswith("```"):
         sql = sql.lstrip("`").lstrip("sql").lstrip("\n")
         sql = sql.rstrip("`").rstrip("\n").strip()
 
-    # The DB stores pgs.min as MM:SS text, and the model sometimes invents a
-    # minutes-played qualifier. For non-minute questions this clause is both
-    # unnecessary and invalid.
+    # remove invalid minutes-based HAVING clauses
     sql = re.sub(
         r"\nHAVING\s+SUM\(\s*pgs\.min(?:::float|::numeric|::double\s+precision)?\s*\)\s*>\s*0\s*",
         "\n",
@@ -86,7 +80,7 @@ def clean_sql(sql: str) -> str:
 
 
 def uses_combined_home_away_team_totals(sql: str) -> bool:
-    """Detect team-stat SQL that totals both teams in each game for one team."""
+    """Detect team-stat SQL that combines both teams' totals per game row."""
     normalized = re.sub(r"\s+", " ", sql.lower())
     has_or_team_join = (
         "home_team_id = t.id or" in normalized
@@ -100,24 +94,46 @@ def uses_combined_home_away_team_totals(sql: str) -> bool:
         ("home_team_blk", "away_team_blk"),
         ("home_team_score", "away_team_score"),
     ]
-    combines_home_away_stat = any(
-        home_col in normalized and away_col in normalized
-        for home_col, away_col in stat_pairs
+    combines_home_away = any(
+        home in normalized and away in normalized
+        for home, away in stat_pairs
     )
-    return has_or_team_join and combines_home_away_stat
+    return has_or_team_join and combines_home_away
 
 
 def uses_aggregate_in_where(sql: str) -> bool:
-    """Detect invalid aggregate filters before GROUP BY."""
+    """Detect aggregate functions incorrectly placed in WHERE clause."""
     normalized = re.sub(r"\s+", " ", sql.lower())
-    where_match = re.search(r"\bwhere\b(.*?)(\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)", normalized)
-    return bool(where_match and re.search(r"\b(sum|avg|count|min|max)\s*\(", where_match.group(1)))
+    where_match = re.search(
+        r"\bwhere\b(.*?)(\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)", normalized
+    )
+    return bool(
+        where_match and re.search(r"\b(sum|avg|count|min|max)\s*\(", where_match.group(1))
+    )
+
+
+def uses_home_team_wins_as_integer(sql: str) -> bool:
+    """Detect queries comparing boolean home_team_wins to an integer."""
+    normalized = re.sub(r"\s+", " ", sql.lower())
+    return bool(re.search(r"home_team_wins\s*=\s*\d", normalized))
+
+
+def uses_nonexistent_games_columns(sql: str) -> bool:
+    """Detect references to columns that don't exist in the games table."""
+    normalized = sql.lower()
+    invalid_columns = [
+        "g.home_team_fga", "g.away_team_fga",
+        "g.home_team_fg3a", "g.away_team_fg3a",
+        "g.home_team_ftm", "g.away_team_ftm",
+        "g.home_team_fta", "g.away_team_fta",
+        "g.home_team_ft_pct", "g.away_team_ft_pct",
+    ]
+    return any(col in normalized for col in invalid_columns)
 
 
 def execute_sql(sql: str) -> list[dict]:
     """Execute a SQL query and return results as a list of dicts."""
     sql = clean_sql(sql)
-    
     db = SessionLocal()
     try:
         result = db.execute(text(sql))
@@ -129,15 +145,15 @@ def execute_sql(sql: str) -> list[dict]:
 
 
 def retry_sql(messages: list[dict], sql: str, feedback: str) -> str:
+    """Send a retry request to Groq with specific feedback about what to fix."""
     retry_messages = messages + [
         {"role": "assistant", "content": sql},
         {"role": "user", "content": feedback},
     ]
-
     retry_response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=retry_messages,
-        max_tokens=500,
+        max_tokens=800,
         temperature=0
     )
     return clean_sql(retry_response.choices[0].message.content.strip())
@@ -145,79 +161,98 @@ def retry_sql(messages: list[dict], sql: str, feedback: str) -> str:
 
 def generate_and_execute(question: str, history: list) -> dict:
     """
-    Generate a SQL query from a natural language question,
-    execute it, and return the results.
-
-    If execution fails, feeds the error back to Groq for a retry.
-    Returns a dict with 'sql' and 'results' keys.
+    Generate SQL from a natural language question, validate it,
+    execute it against Postgres, and return results.
+    Includes pre-execution validators and an error retry loop.
     """
-    messages = [
-        {"role": "system", "content": SCHEMA_PROMPT}
-    ]
+    messages = [{"role": "system", "content": SCHEMA_PROMPT}]
 
     for m in history[-4:]:
         messages.append({"role": m["role"], "content": m["content"]})
 
     messages.append({"role": "user", "content": question})
 
-    # first attempt
+    # generate SQL
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
-        max_tokens=500,
+        max_tokens=800,
         temperature=0
     )
-    sql = response.choices[0].message.content.strip()
+    sql = clean_sql(response.choices[0].message.content.strip())
 
-    sql = clean_sql(sql)
-
+    # pre-execution validators
     if uses_combined_home_away_team_totals(sql):
         sql = retry_sql(
-            messages,
-            sql,
-            "That query incorrectly combines both teams' game totals for each team. Fix it using a UNION ALL subquery with one row per team-game: one SELECT for home_team_id with the home_team stat, and one SELECT for away_team_id with the away_team stat. Then JOIN teams on the subquery team_id and AVG only that team's stat. Return ONLY the corrected query."
+            messages, sql,
+            "That query incorrectly combines both teams' stats per game row. "
+            "Fix it using UNION ALL: one SELECT for home_team_id with home stat, "
+            "one SELECT for away_team_id with away stat. AVG only that team's stat. "
+            "Return ONLY corrected SQL."
         )
 
     if uses_aggregate_in_where(sql):
         sql = retry_sql(
-            messages,
-            sql,
-            "That query incorrectly places an aggregate function such as SUM, AVG, or COUNT in WHERE. Move aggregate filters to HAVING after GROUP BY. For shooting percentage leader qualifiers, use the exact HAVING threshold from the system rules. Return ONLY the corrected query."
+            messages, sql,
+            "That query places an aggregate (SUM/AVG/COUNT) in WHERE. "
+            "Move aggregate filters to HAVING after GROUP BY. "
+            "Return ONLY corrected SQL."
         )
 
-    # validate it's a SELECT
+    if uses_home_team_wins_as_integer(sql):
+        sql = retry_sql(
+            messages, sql,
+            "home_team_wins is BOOLEAN (true/false), not an integer. "
+            "Fix the comparison and return ONLY corrected SQL."
+        )
+
+    if uses_nonexistent_games_columns(sql):
+        sql = retry_sql(
+            messages, sql,
+            "The games table has NO ft_pct, fga, fg3a, ftm, or fta columns. "
+            "For team FT% use player_game_stats grouped by team_id and game_id. "
+            "For team FG% use home_team_fg_pct / away_team_fg_pct via UNION ALL. "
+            "Return ONLY corrected SQL."
+        )
+
+    # validate SELECT
     if not sql.upper().startswith("SELECT"):
         raise ValueError(f"Invalid SQL generated: {sql[:100]}")
 
-    # try to execute
+    # execute
     try:
         results = execute_sql(sql)
+
+        # retry if empty results
         if not results:
             sql = retry_sql(
-                messages,
-                sql,
-                "That query executed but returned zero rows. Fix the SQL and return ONLY the corrected query with no markdown, backticks, or explanation. Relax unnecessary HAVING clauses and qualifiers. Do not use pgs.min. For scoring leaders, do not require minutes or attempts. For playoff three-point percentage, use HAVING SUM(pgs.fg3a) >= 10 at most."
+                messages, sql,
+                "That query returned zero rows. Relax unnecessary HAVING qualifiers. "
+                "Do not filter on pgs.min. For playoff 3P% use HAVING SUM(pgs.fg3a) >= 10 at most. "
+                "Return ONLY corrected SQL."
             )
-
             if not sql.upper().startswith("SELECT"):
                 raise ValueError(f"Empty-result retry generated invalid SQL: {sql[:100]}")
-
             results = execute_sql(sql)
+
         return {"sql": sql, "results": results}
 
     except Exception as e:
         print(f"SQL execution failed: {e}")
         print(f"Failed SQL: {sql}")
 
-        # retry — feed error back to Groq
         sql = retry_sql(
-            messages,
-            sql,
-            f"That query failed with this error: {str(e)}. Fix the SQL and return ONLY the corrected query with no markdown, backticks, or explanation. Put aggregate filters in HAVING, not WHERE. Do not use pgs.min, SUM(pgs.min), or pgs.min::float unless the question explicitly asks about minutes."
+            messages, sql,
+            f"That query failed: {str(e)}. Fix it. "
+            "Put aggregate filters in HAVING not WHERE. "
+            "Never use pgs.min in SUM/AVG. "
+            "games has no ft_pct, fga, fg3a, ftm, fta columns. "
+            "home_team_wins is BOOLEAN. "
+            "Return ONLY corrected SQL."
         )
 
         if not sql.upper().startswith("SELECT"):
-            raise ValueError(f"Retry also generated invalid SQL: {sql[:100]}")
+            raise ValueError(f"Retry generated invalid SQL: {sql[:100]}")
 
         results = execute_sql(sql)
         return {"sql": sql, "results": results}
