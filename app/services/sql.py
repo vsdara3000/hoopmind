@@ -1,12 +1,7 @@
-import os
 import re
-from groq import Groq
-from dotenv import load_dotenv
 from sqlalchemy import text
 from app.database import SessionLocal
-
-load_dotenv()
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+from app.services.llm import chat
 
 SCHEMA_PROMPT = """You are an NBA stats analyst with access to a PostgreSQL database.
 Generate a single valid SQL SELECT query to answer the user's question.
@@ -58,6 +53,8 @@ RULES:
 - Always wrap OR player name conditions in parentheses: WHERE (first_name ILIKE '%x%' AND last_name ILIKE '%y%') AND other_conditions. Never use OR without parentheses when mixing with AND filters on other columns.
 - season_averages columns (pts, reb, ast, stl, blk, fg_pct, fg3_pct, ft_pct) are already per-game averages. SELECT them directly. Never divide by games_played.
 - For team stats with multiple columns, use a single query from player_game_stats grouped by team_id and game_id, then average across games. Never generate multiple UNION ALL blocks per stat column.
+- Some player names have accented characters (e.g. Jokić, Dončić). Always wrap name searches with unaccent(): WHERE unaccent(p.first_name) ILIKE unaccent('%Jokic%') AND unaccent(p.last_name) ILIKE unaccent('%Jokic%'). This ensures accent-insensitive matching.
+- Always wrap ALL WHERE conditions in parentheses when using OR: WHERE ((condition1) OR (condition2)) AND other_filter. Never let OR conditions bleed into AND filters.
 - LIMIT 50 unless asked for more.
 - Return ONLY raw SQL. No markdown, backticks, explanation. First char must be S."""
 
@@ -134,14 +131,10 @@ def uses_nonexistent_games_columns(sql: str) -> bool:
 def execute_sql(sql: str) -> list[dict]:
     """Execute a SQL query and return results as a list of dicts."""
     sql = clean_sql(sql)
-    db = SessionLocal()
-    try:
+    with SessionLocal() as db:
         result = db.execute(text(sql))
         columns = result.keys()
-        rows = [dict(zip(columns, row)) for row in result.fetchall()]
-        return rows
-    finally:
-        db.close()
+        return [dict(zip(columns, row)) for row in result.fetchall()]
 
 
 def retry_sql(messages: list[dict], sql: str, feedback: str) -> str:
@@ -150,13 +143,43 @@ def retry_sql(messages: list[dict], sql: str, feedback: str) -> str:
         {"role": "assistant", "content": sql},
         {"role": "user", "content": feedback},
     ]
-    retry_response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=retry_messages,
-        max_tokens=800,
-        temperature=0
-    )
-    return clean_sql(retry_response.choices[0].message.content.strip())
+    return clean_sql(chat(retry_messages, max_tokens=800, temperature=0))
+
+
+# (validator, feedback) pairs applied to generated SQL before execution
+VALIDATORS = [
+    (
+        uses_combined_home_away_team_totals,
+        "That query incorrectly combines both teams' stats per game row. "
+        "Fix it using UNION ALL: one SELECT for home_team_id with home stat, "
+        "one SELECT for away_team_id with away stat. AVG only that team's stat. "
+        "Return ONLY corrected SQL.",
+    ),
+    (
+        uses_aggregate_in_where,
+        "That query places an aggregate (SUM/AVG/COUNT) in WHERE. "
+        "Move aggregate filters to HAVING after GROUP BY. "
+        "Return ONLY corrected SQL.",
+    ),
+    (
+        uses_home_team_wins_as_integer,
+        "home_team_wins is BOOLEAN (true/false), not an integer. "
+        "Fix the comparison and return ONLY corrected SQL.",
+    ),
+    (
+        uses_nonexistent_games_columns,
+        "The games table has NO ft_pct, fga, fg3a, ftm, or fta columns. "
+        "For team FT% use player_game_stats grouped by team_id and game_id. "
+        "For team FG% use home_team_fg_pct / away_team_fg_pct via UNION ALL. "
+        "Return ONLY corrected SQL.",
+    ),
+]
+
+
+def _require_select(sql: str, context: str):
+    """Raise if the SQL is not a SELECT statement."""
+    if not sql.upper().startswith("SELECT"):
+        raise ValueError(f"{context}: {sql[:100]}")
 
 
 def generate_and_execute(question: str, history: list) -> dict:
@@ -166,64 +189,20 @@ def generate_and_execute(question: str, history: list) -> dict:
     Includes pre-execution validators and an error retry loop.
     """
     messages = [{"role": "system", "content": SCHEMA_PROMPT}]
-
-    for m in history[-4:]:
-        messages.append({"role": m["role"], "content": m["content"]})
-
+    messages += [{"role": m["role"], "content": m["content"]} for m in history[-4:]]
     messages.append({"role": "user", "content": question})
 
-    # generate SQL
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=messages,
-        max_tokens=800,
-        temperature=0
-    )
-    sql = clean_sql(response.choices[0].message.content.strip())
+    sql = clean_sql(chat(messages, max_tokens=800, temperature=0))
 
-    # pre-execution validators
-    if uses_combined_home_away_team_totals(sql):
-        sql = retry_sql(
-            messages, sql,
-            "That query incorrectly combines both teams' stats per game row. "
-            "Fix it using UNION ALL: one SELECT for home_team_id with home stat, "
-            "one SELECT for away_team_id with away stat. AVG only that team's stat. "
-            "Return ONLY corrected SQL."
-        )
+    for check, feedback in VALIDATORS:
+        if check(sql):
+            sql = retry_sql(messages, sql, feedback)
 
-    if uses_aggregate_in_where(sql):
-        sql = retry_sql(
-            messages, sql,
-            "That query places an aggregate (SUM/AVG/COUNT) in WHERE. "
-            "Move aggregate filters to HAVING after GROUP BY. "
-            "Return ONLY corrected SQL."
-        )
+    _require_select(sql, "Invalid SQL generated")
 
-    if uses_home_team_wins_as_integer(sql):
-        sql = retry_sql(
-            messages, sql,
-            "home_team_wins is BOOLEAN (true/false), not an integer. "
-            "Fix the comparison and return ONLY corrected SQL."
-        )
-
-    if uses_nonexistent_games_columns(sql):
-        sql = retry_sql(
-            messages, sql,
-            "The games table has NO ft_pct, fga, fg3a, ftm, or fta columns. "
-            "For team FT% use player_game_stats grouped by team_id and game_id. "
-            "For team FG% use home_team_fg_pct / away_team_fg_pct via UNION ALL. "
-            "Return ONLY corrected SQL."
-        )
-
-    # validate SELECT
-    if not sql.upper().startswith("SELECT"):
-        raise ValueError(f"Invalid SQL generated: {sql[:100]}")
-
-    # execute
     try:
         results = execute_sql(sql)
 
-        # retry if empty results
         if not results:
             sql = retry_sql(
                 messages, sql,
@@ -231,8 +210,7 @@ def generate_and_execute(question: str, history: list) -> dict:
                 "Do not filter on pgs.min. For playoff 3P% use HAVING SUM(pgs.fg3a) >= 10 at most. "
                 "Return ONLY corrected SQL."
             )
-            if not sql.upper().startswith("SELECT"):
-                raise ValueError(f"Empty-result retry generated invalid SQL: {sql[:100]}")
+            _require_select(sql, "Empty-result retry generated invalid SQL")
             results = execute_sql(sql)
 
         return {"sql": sql, "results": results}
@@ -250,9 +228,6 @@ def generate_and_execute(question: str, history: list) -> dict:
             "home_team_wins is BOOLEAN. "
             "Return ONLY corrected SQL."
         )
+        _require_select(sql, "Retry generated invalid SQL")
 
-        if not sql.upper().startswith("SELECT"):
-            raise ValueError(f"Retry generated invalid SQL: {sql[:100]}")
-
-        results = execute_sql(sql)
-        return {"sql": sql, "results": results}
+        return {"sql": sql, "results": execute_sql(sql)}

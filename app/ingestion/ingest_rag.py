@@ -3,8 +3,7 @@ import wikipedia
 from sentence_transformers import SentenceTransformer
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
-from app.models.unstructured import Document
-from app.models.structured import Player
+from app.models import Document, Player
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 

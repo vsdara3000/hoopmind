@@ -1,6 +1,31 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, Date, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Float, Boolean, Date, ForeignKey
+from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
+from pgvector.sqlalchemy import Vector
 from app.database import Base
+
+
+# --- Conversations ---
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String, unique=True)
+    created_at = Column(String, server_default=func.now())
+
+
+class Message(Base):
+    __tablename__ = "messages"
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"))
+    role = Column(String)
+    content = Column(Text)
+    route = Column(String, nullable=True)
+    generated_sql = Column(Text, nullable=True)
+    created_at = Column(String, server_default=func.now())
+
+
+# --- Structured (stats) ---
 
 class Team(Base):
     __tablename__ = "teams"
@@ -12,6 +37,7 @@ class Team(Base):
     state = Column(String, nullable=True)
     year_founded = Column(Integer, nullable=True)
 
+
 class Player(Base):
     __tablename__ = "players"
     id = Column(Integer, primary_key=True)
@@ -21,6 +47,7 @@ class Player(Base):
     is_active = Column(Boolean, nullable=True)
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
     team = relationship("Team")
+
 
 class Game(Base):
     __tablename__ = "games"
@@ -33,7 +60,6 @@ class Game(Base):
     home_team_wins = Column(Boolean, nullable=True)
     season = Column(Integer)
     postseason = Column(Boolean, default=False)
-    # new columns
     home_team_fg_pct = Column(Float, nullable=True)
     away_team_fg_pct = Column(Float, nullable=True)
     home_team_fg3_pct = Column(Float, nullable=True)
@@ -49,13 +75,14 @@ class Game(Base):
     home_team_blk = Column(Integer, nullable=True)
     away_team_blk = Column(Integer, nullable=True)
 
+
 class PlayerGameStats(Base):
     __tablename__ = "player_game_stats"
     id = Column(Integer, primary_key=True)
     player_id = Column(Integer, ForeignKey("players.id"))
     game_id = Column(Integer, ForeignKey("games.id"))
     team_id = Column(Integer, ForeignKey("teams.id"))
-    min = Column(Float, nullable=True)  # Changed from String to Float
+    min = Column(Float, nullable=True)
     pts = Column(Integer, nullable=True)
     reb = Column(Integer, nullable=True)
     ast = Column(Integer, nullable=True)
@@ -75,6 +102,7 @@ class PlayerGameStats(Base):
     turnover = Column(Integer, nullable=True)
     pf = Column(Integer, nullable=True)
 
+
 class SeasonAverage(Base):
     __tablename__ = "season_averages"
     id = Column(Integer, primary_key=True)
@@ -90,3 +118,16 @@ class SeasonAverage(Base):
     fg_pct = Column(Float, nullable=True)
     fg3_pct = Column(Float, nullable=True)
     ft_pct = Column(Float, nullable=True)
+
+
+# --- Unstructured (RAG documents) ---
+
+class Document(Base):
+    __tablename__ = "documents"
+    id = Column(Integer, primary_key=True)
+    content = Column(String)
+    doc_type = Column(String)  # bio, recap, news
+    player_id = Column(Integer, ForeignKey("players.id"), nullable=True)
+    game_id = Column(Integer, ForeignKey("games.id"), nullable=True)
+    source = Column(String, nullable=True)
+    embedding = Column(Vector(384))

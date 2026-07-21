@@ -1,9 +1,4 @@
-import os
-from groq import Groq
-from dotenv import load_dotenv
-
-load_dotenv()
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+from app.services.llm import classify, format_history
 
 ROUTER_SYSTEM_PROMPT = """You are a query router for an NBA stats and information assistant.
 
@@ -25,32 +20,16 @@ Never explain your choice. Never return anything else."""
 def route_question(question: str, history: list) -> str:
     """
     Classify a user question as SQL, RAG, or BOTH.
-    
+
     Takes the question and recent conversation history so it can
     understand follow-up questions in context.
     Returns exactly one string: 'SQL', 'RAG', or 'BOTH'
     """
-    # format history for context
-    history_text = ""
-    if history:
-        history_text = "\n".join([f"{m['role']}: {m['content']}" for m in history[-4:]])
-        history_text = f"\nRecent conversation:\n{history_text}\n"
-
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"{history_text}Question to classify: {question}"}
-        ],
-        max_tokens=10,
-        temperature=0  # deterministic — we want consistent routing
+    user_content = f"{format_history(history)}Question to classify: {question}"
+    return classify(
+        ROUTER_SYSTEM_PROMPT,
+        user_content,
+        allowed={"SQL", "RAG", "BOTH"},
+        default="BOTH",
+        model="llama-3.1-8b-instant",
     )
-
-    result = response.choices[0].message.content.strip().upper()
-
-    # safety check — if model returns something unexpected default to BOTH
-    if result not in ["SQL", "RAG", "BOTH"]:
-        print(f"Router returned unexpected value: {result}, defaulting to BOTH")
-        return "BOTH"
-
-    return result

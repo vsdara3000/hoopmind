@@ -4,7 +4,7 @@ from nba_api.stats.endpoints import leaguegamefinder, boxscoretraditionalv3
 from sqlalchemy.orm import Session
 from sympy import group
 from app.database import SessionLocal
-from app.models.structured import Team, Player, Game, PlayerGameStats, SeasonAverage
+from app.models import Team, Player, Game, PlayerGameStats, SeasonAverage
 
 
 def ingest_teams():
